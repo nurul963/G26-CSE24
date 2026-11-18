@@ -1,6 +1,6 @@
 import { User } from "../models/user.model.js";
 import bcrypt from 'bcrypt';
-import { generateAccessToken, generateRefreshToken, getRefreshExpiry, hashToken } from "../utils/tokens.js";
+import { generateAccessToken, generateRefreshToken, getRefreshExpiry, hashToken, verifyRefreshToken } from "../utils/tokens.js";
 import RefreshSession from "../models/RefreshSession.js";
 import { NODE_ENV } from "../utils/env.js";
 const COOKIE_NAME = "refreshToken";
@@ -73,20 +73,16 @@ export const login=async(req,resp)=>{
                 success:false
             })
         }
-        
         const isMatched=await bcrypt.compare(password,user.password);
-      
         if(!isMatched){
             return resp.status(400).json({
                 message:"Invalid Credential",
                 success:false
             }) 
         }
-        console.log(email);
         const refreshToken=generateRefreshToken(user);
         const accessToken=generateAccessToken(user);
         setRefreshCookie(resp,refreshToken);
-        console.log(hashToken(refreshToken));
         await RefreshSession.create({
             userId:user._id,
             tokenHash:hashToken(refreshToken),
@@ -101,9 +97,87 @@ export const login=async(req,resp)=>{
             accessToken
         })
     } catch (error) {
+        
       return resp.status(500).json({
         message:error.message,
         success:false
       })  
     }
+}
+export const refreshAccessToken=async(req,resp)=>{
+    const oldSession=req?.cookies?.[COOKIE_NAME];
+    
+    if(!oldSession){
+        return resp.status(401).json({
+            message:"Refresh token missing",
+            success:false
+        })
+    }
+    try {
+        const decode=verifyRefreshToken(oldSession);
+        if(decode.type!=="refresh"){
+            return resp.status(401).json({
+                message:"Invalid Token"
+            })
+        }
+        const accessToken=generateAccessToken({_id:decode.sub,role:decode.role});
+        const oldeRefreshToken=await RefreshSession
+                                .findOneAndUpdate(
+                                    {
+                                        userId:decode.sub,
+                                        tokenHash:hashToken(oldSession),
+                                        expiresAt:{$gt:new Date()}
+                                    },
+                                    {
+                                        $set:{
+                                            revokedAt:new Date()
+                                        }
+                                    },
+                                    {
+                                        new:true
+                                    }
+                                );
+        console.log('OLD REFRESH'+ oldeRefreshToken)
+        if(!oldeRefreshToken){
+            return resp.status(401).json({
+                message:"Refresh Token Expired pls login..",
+                success:false
+            })
+        }
+        const newRefreshToken=generateRefreshToken({_id:decode.sub,role:decode.role});
+        setRefreshCookie(resp,newRefreshToken);
+        await RefreshSession.create({
+            userId:decode.sub,
+            tokenHash:hashToken(newRefreshToken),
+            expiresAt:getRefreshExpiry(newRefreshToken)
+        });
+        return resp.status(200).json({
+            message:"New Access Token",
+            success:true,
+            accessToken
+        })
+    } catch (error) {
+        console.log(error)
+       return resp.status(500).json({
+        message:"Refresh token has been expired",
+        success:false
+       }) 
+    }
+}
+export const logout=async(req,resp)=>{
+    clearRefreshCookie(resp);
+    return resp.status(200).json({
+        message:"Lgout Success",
+        success:true
+    })
+}
+export const getProfile=async(req,resp)=>{
+    const user=await User.findById(req.user.sub);
+    if(!user){
+        return resp.status(400).json({
+            message:"User not found",
+            success:false
+        })
+    }
+    return resp.status(200).json(user);
 }
